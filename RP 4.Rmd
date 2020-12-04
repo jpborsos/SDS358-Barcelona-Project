@@ -1,0 +1,178 @@
+---
+title: "RP3"
+author: "Nicholas Aufiero and JP Borsos"
+date: "12/4/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(psych)
+library(leaps)
+library(car)
+library(IDPmisc)
+
+data <- read.csv("shotInfo20042005.csv")
+
+for (year in 2005:2018) {
+  data2 <- read.csv(stringr::str_interp("shotInfo${year}${year+1}.csv"))
+  data <- rbind(total,data2)
+}
+```
+
+# Data Preprocessing
+## Creating Dummy variables
+```{r echo=TRUE}
+data$RightFoot <- ifelse(data$body_part == 'Right Foot', 1, 0)
+data$LeftFoot <- ifelse(data$body_part == 'Left Foot', 1, 0)
+data$Head <- ifelse(data$body_part == 'Head', 1, 0)
+
+data$GroundPass <- ifelse(data$assist_height == 'Ground Pass', 1, 0)
+data$LowPass <- ifelse(data$assist_height == 'Low Pass', 1, 0)
+data$HighPass <- ifelse(data$assist_height == 'High Pass', 1, 0)
+```
+
+
+## Correlation matrix
+Shown both without the body part used to shoot and with the body part:
+```{r echo=TRUE}
+# Without
+pairs.panels(data[c('start_distance','shot_distance','number_of_passes','possession_duration','shot_angle','goal','xG')],
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             smooth = FALSE, density = FALSE, ellipses = FALSE)
+
+# With body part
+pairs.panels(data[c('start_distance','shot_distance','number_of_passes','possession_duration','shot_angle','RightFoot','LeftFoot','Head','goal','xG')],
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             smooth = FALSE, density = FALSE, ellipses = FALSE)
+```
+
+
+## Take log of dependent variable "xG" --> "lnxG" and add polynomial terms
+This increases our R^2 adjusted, and our residuals and normal probability plots 
+adhere to normality much more when the log of xG is taken. 
+```{r echo=TRUE}
+#data <- data %>%
+#  mutate(lnGoal = log(goal))
+data <- data %>%
+  mutate(lnxG = log(xG),
+         shot_distance2 = shot_distance^2,
+         shot_angle2 = shot_angle^2,
+         number_of_passes2 = number_of_passes^2,
+         possession_duration2 = possession_duration^2)
+
+data <- subset(data, select = -c(body_part,assist_height) )
+
+data <- data[!is.infinite(rowSums(data)),]
+
+reg <- lm(lnxG ~ shot_distance+shot_distance2+number_of_passes+number_of_passes2+possession_duration+possession_duration2+shot_angle+shot_angle2+RightFoot+LeftFoot+Head, data)
+summary(reg)
+```
+
+
+# Residuals and Normal probability
+```{r echo=TRUE}
+data$resids <- residuals(reg)
+data$predicted <- predict(reg)
+ggplot(data, aes(x=predicted, y=resids)) + geom_point() + geom_hline(yintercept=0, color = "blue") +
+  labs(title ="Residuals versus Fitted values", x = "Fitted values", y = "Residuals")
+
+# Normal probability plot
+ggplot(data, aes(sample = resids)) + stat_qq() + stat_qq_line() +
+  labs(title ="Normal Probability Plot", x = "Theoretical percentiles", y = "Sample percentiles") 
+```
+
+
+# Model building strategy
+## Create 4 model criteria plots
+Find the best model for each number of predictors, and it looks like 5 predictors is the optimized number. 
+
+```{r echo=TRUE}
+models <- regsubsets(lnxG ~ shot_distance+shot_distance2+number_of_passes+number_of_passes2+possession_duration+possession_duration2+shot_angle+shot_angle2+RightFoot+LeftFoot+Head, data, nvmax = 11)
+models.sum <- summary(models)
+# Create four plots within a 2x2 frame to compare the different criteria
+par(mfrow = c(2,2))
+# SSE
+plot(models.sum$rss, xlab = "Number of predictors", ylab = "SSE", type = "l")
+# R2
+plot(models.sum$adjr2, xlab = "Number of predictors", ylab = "Adjusted RSq", type = "l")
+# Mallow's Cp
+plot(models.sum$cp, xlab = "Number of predictors", ylab = "Cp", type = "l")
+# BIC
+plot(models.sum$bic, xlab = "Number of predictors", ylab = "BIC", type = "l")
+```
+
+
+## Which 5 predictors?
+As we can see, the five predictors would be shot_distance, shot_distance2, shot_angle, shot_angle2, and Head, which is a true/false.
+```{r echo=TRUE}
+models.sum$outmat
+```
+
+## New Model
+As we can see, we now created a model using the five predictors highlighted above and still achieve similar a $R^2$, significant p-values, and similar residual and normal probability plots. 
+```{r echo=TRUE}
+reg5var <- lm(lnxG ~ shot_distance+shot_angle+shot_distance2+shot_angle2+Head, data)
+summary(reg5var)
+
+data$resids5var <- residuals(reg5var)
+data$predicted5var <- predict(reg5var)
+ggplot(data, aes(x=predicted5var, y=resids5var)) + geom_point() + geom_hline(yintercept=0, color = "blue") +
+  labs(title ="Residuals versus Fitted values", x = "Fitted values", y = "Residuals")
+
+# Normal probability plot
+ggplot(data, aes(sample = resids5var)) + stat_qq() + stat_qq_line() +
+  labs(title ="Normal Probability Plot", x = "Theoretical percentiles", y = "Sample percentiles") 
+```
+
+## Multicollinearity
+As we can see, there are multicollinearity issues as some of the predictors have high VIF, but this makes sense because there are squared terms of other terms. Centering doesn't solve the issue, as they are still related. Is this something we should be concerned about? It seems logical to us.
+```{r echo=TRUE}
+vif(reg5var)
+```
+
+```{r echo=TRUE}
+data <- data %>%
+  mutate(shot_distance.c = shot_distance - mean(shot_distance),
+         shot_angle.c = shot_angle - mean(shot_angle),
+         shot_distance2.c = shot_distance^2 - mean(shot_distance^2),
+         shot_angle2.c = shot_angle^2 - mean(shot_angle^2),
+         )
+
+regC <- lm(lnxG ~ shot_distance.c+shot_angle.c+shot_distance2.c+shot_angle2.c+Head, data)
+summary(regC)
+vif(regC)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
